@@ -1,0 +1,303 @@
+
+<!doctype html>
+
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=0.9" />
+  <title>DotDrop</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;line-height:1.5;margin:0;padding:18px;background:#0f172a;color:#e6eef8}
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.02));padding:16px;border-radius:12px;box-shadow:0 6px 24px rgba(2,6,23,0.6);max-width:980px;margin:18px auto}
+    h1{margin:0 0 8px;font-size:25px}
+    p.lead{margin:0 0 12px;color:#bcd3ff}
+    .cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    label{display:block;margin:8px 0 4px;font-size:13px;color:#cfe0ff}
+    input,textarea,button,select{font:inherit}
+    input[type="text"], input[type="password"], textarea{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit}
+    textarea{min-height:90px;resize:vertical}
+    .row{display:flex;gap:8px;align-items:center}
+    button{background:#2563eb;border:none;padding:8px 10px;border-radius:8px;color:white;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid rgba(255,255,255,0.06)}
+    .status{font-size:13px;margin-top:8px}
+    .file-list{margin-top:12px}
+    progress{width:100%;height:12px;border-radius:8px;overflow:hidden}
+    small.hint{color:#9fb5ff}
+    footer{font-size:12px;color:#9fb5ff;margin-top:12px}
+    @media (max-width:800px){.cols{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>DotDrop — 点传</h1>
+    <p class="lead">在两台设备上打开此页面（或把文件放到一台做 Host，另一台 Join），手动交换信令字符串即可建立点对点连接；发送端会用密码把文件加密，接收端输入密码后解密并下载。</p>
+    <p class="lead">在两台设备上打开此页面，一台设备点Host，一台点join，把host端的密钥输到join端的输入框，在生成join ，把join端的密钥输到host端的输入框，host端点连接。</p><div class="cols">
+  <div>
+    <h3>(1) 建立连接（手动交换 Offer/Answer）</h3>
+    <label>本地操作：</label>
+    <div class="row">
+      <button id="createOffer">Create Offer（发送端/Host）</button>
+      <button id="createAnswer">Create Answer（接收端/Join）</button>
+      <button id="copyLocal" class="ghost">Copy</button>
+    </div>
+    <label>本地 SDP（或 Answer）</label>
+    <textarea id="localSDP" placeholder="本地生成的 SDP 会出现在这里，可以复制发给对方"></textarea>
+
+    <label>粘贴远端 SDP（对方发来的 Offer/Answer）</label>
+    <textarea id="remoteSDP" placeholder="把对方的 SDP 粘贴到这里，然后点击 Set Remote"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="setRemote">Set Remote</button>
+      <button id="clearSDP" class="ghost">Clear</button>
+    </div>
+
+    <div class="status" id="connStatus">状态：未连接</div>
+  </div>
+
+  <div>
+    <h3>(2) 文件与密码</h3>
+    <label>选择文件（发送端）</label>
+    <input id="fileInput" type="file">
+    <label>设置传输密码（发送端用于加密）</label>
+    <input id="sendPassword" type="password" placeholder="设置传输密码（接收端须输入相同密码）">
+    <div style="margin-top:8px" class="row">
+      <button id="sendFile">加密并发送文件</button>
+      <button id="abortSend" class="ghost">取消发送</button>
+    </div>
+
+    <div class="file-list">
+      <label>接收端：等待或输入密码并下载</label>
+      <input id="recvPassword" type="password" placeholder="输入密码后尝试解密并下载">
+      <div style="margin-top:8px" class="row">
+        <button id="tryDecrypt">尝试解密并下载</button>
+        <button id="clearReceived" class="ghost">清空</button>
+      </div>
+
+      <div id="recvMeta" style="margin-top:8px"></div>
+      <progress id="progress" value="0" max="100" style="display:none"></progress>
+      <div id="log" style="margin-top:8px;font-size:13px;color:#cfe0ff"></div>
+    </div>
+  </div>
+</div>
+
+<footer>说明：此页面实现端对端（P2P）加密传输，使用 AES-GCM 客户端加密；需要手动复制/粘贴信令（SDP）。不要在不信任的网络里传输极机密数据（这里是学习/方便用的实现）。</footer>
+
+  </div><script>
+// Simple WebRTC + AES-GCM encryption transfer (manual SDP exchange)
+let pc = null;
+let dc = null;
+let isHost = false; // if created offer => host (sender usually)
+const configuration = {iceServers:[{urls:['stun:stun.l.google.com:19302']} ] };
+const chunkSize = 64 * 1024; // 64KB
+
+const el = id=>document.getElementById(id);
+const setStatus = s=>el('connStatus').textContent = '状态：' + s;
+const log = (s)=>{ el('log').textContent = s }
+
+function createPeerAndChannel(makeOffer){
+  pc = new RTCPeerConnection(configuration);
+  pc.onicecandidate = e=>{
+    // gather candidates into SDP automatically
+    // the produced SDP in localSDP will include candidates after setLocalDescription resolves
+  };
+  pc.onconnectionstatechange = ()=>{
+    setStatus(pc.connectionState);
+  };
+  pc.ondatachannel = (ev)=>{
+    dc = ev.channel;
+    setupDataChannel();
+  };
+
+  if(makeOffer){
+    isHost = true;
+    dc = pc.createDataChannel('dd-dotdrop');
+    setupDataChannel();
+  }
+}
+
+function setupDataChannel(){
+  dc.binaryType = 'arraybuffer';
+  dc.onopen = ()=>{ setStatus('datachannel open'); log('DataChannel 已打开，可传输文件'); };
+  dc.onclose = ()=>{ setStatus('datachannel closed'); log('通道已关闭'); };
+  dc.onerror = (e)=>{ console.error(e); log('DataChannel 错误: '+e); };
+  dc.onmessage = handleMessageFromDC;
+}
+
+async function createAndShowSDP(isOffer){
+  createPeerAndChannel(isOffer);
+  if(isOffer){
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // wait ICE gathering
+    await waitForIceGathering();
+    el('localSDP').value = btoa(unescape(encodeURIComponent(JSON.stringify(pc.localDescription))));
+  }else{
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceGathering();
+    el('localSDP').value = btoa(unescape(encodeURIComponent(JSON.stringify(pc.localDescription))));
+  }
+}
+
+function waitForIceGathering(){
+  return new Promise(resolve=>{
+    if(pc.iceGatheringState === 'complete') return resolve();
+    function check(){ if(pc.iceGatheringState === 'complete'){ pc.removeEventListener('icegatheringstatechange', check); resolve(); }}
+    pc.addEventListener('icegatheringstatechange', check);
+    // safety: timeout
+    setTimeout(resolve, 5000);
+  });
+}
+
+el('createOffer').addEventListener('click', async ()=>{
+  try{ await createAndShowSDP(true); setStatus('Offer 已生成，请复制并发给对方'); }
+  catch(e){ console.error(e); alert('生成 Offer 失败：'+e); }
+});
+el('createAnswer').addEventListener('click', async ()=>{
+  try{
+    createPeerAndChannel(false);
+    setStatus('等待对方 Offer，然后粘贴到 Remote SDP');
+  }catch(e){console.error(e)}
+});
+
+el('copyLocal').addEventListener('click', ()=>{
+  const text = el('localSDP').value; if(!text) return; navigator.clipboard.writeText(text).then(()=>{alert('已复制到剪贴板')});
+});
+
+el('setRemote').addEventListener('click', async ()=>{
+  const v = el('remoteSDP').value.trim(); if(!v) return alert('请先粘贴远端 SDP 字符串');
+  try{
+    const sdp = JSON.parse(decodeURIComponent(escape(atob(v))));
+    await pc.setRemoteDescription(sdp);
+    if(!isHost){
+      // we are joiner who createdPeer without offer; need to create answer now
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await waitForIceGathering();
+      el('localSDP').value = btoa(unescape(encodeURIComponent(JSON.stringify(pc.localDescription))));
+      setStatus('Answer 已生成，请复制并回传给 Offer 发起方');
+    } else {
+      setStatus('Remote set，等待连接');
+    }
+  }catch(e){console.error(e); alert('设置远端 SDP 失败：'+e)}
+});
+
+el('clearSDP').addEventListener('click', ()=>{ el('localSDP').value=''; el('remoteSDP').value=''; });
+
+// ---------- Encryption helpers ----------
+async function deriveKeyFromPassword(password, saltBuf){
+  const enc = new TextEncoder();
+  const pwKey = await crypto.subtle.importKey('raw', enc.encode(password), {name:'PBKDF2'}, false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey({name:'PBKDF2',salt:saltBuf,iterations:150000,hash:'SHA-256'}, pwKey, {name:'AES-GCM',length:256}, false, ['encrypt','decrypt']);
+  return key;
+}
+function bufToBase64(b){ return btoa(String.fromCharCode(...new Uint8Array(b))); }
+function base64ToBuf(s){ const bin = atob(s); const arr = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i); return arr.buffer; }
+
+// ---------- Sending file ----------
+let sending = false;
+let abortController = {abort:false};
+
+el('sendFile').addEventListener('click', async ()=>{
+  if(!dc || dc.readyState !== 'open') return alert('DataChannel 未打开，先建立连接');
+  const f = el('fileInput').files[0]; if(!f) return alert('请选择文件');
+  const password = el('sendPassword').value; if(!password) return alert('请设置密码');
+
+  sending = true; abortController.abort = false;
+  el('progress').style.display='block'; el('progress').value=0;
+
+  // read file as arraybuffer
+  const buf = await f.arrayBuffer();
+  // create random salt and iv
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKeyFromPassword(password, salt.buffer);
+  const encrypted = await crypto.subtle.encrypt({name:'AES-GCM',iv:iv}, key, buf);
+
+  // send metadata: name, size, salt, iv, encSize
+  const meta = {type:'meta',name:f.name,origSize:buf.byteLength,encSize:encrypted.byteLength,salt:bufToBase64(salt.buffer),iv:bufToBase64(iv.buffer)};
+  dc.send(JSON.stringify(meta));
+  log('已发送 meta，准备传输数据...');
+
+  // send encrypted in chunks
+  const encView = new Uint8Array(encrypted);
+  const total = encView.byteLength;
+  let offset = 0;
+  let seq = 0;
+  while(offset < total){
+    if(abortController.abort){ log('已取消发送'); sending=false; return }
+    const end = Math.min(offset + chunkSize, total);
+    const chunk = encView.slice(offset,end);
+    // prefix a 1-byte header? we'll send raw ArrayBuffer chunks (receiver uses order)
+    dc.send(chunk.buffer);
+    offset = end; seq++;
+    const pct = Math.floor((offset/total)*100);
+    el('progress').value = pct;
+    log('发送中：'+pct+'%');
+    // throttle a tiny bit to avoid overwhelming channel
+    await new Promise(r=>setTimeout(r,10));
+  }
+  // finally send end marker
+  dc.send(JSON.stringify({type:'end'}));
+  sending=false; el('progress').value=100; log('发送完成');
+});
+
+el('abortSend').addEventListener('click', ()=>{ abortController.abort = true; });
+
+// ---------- Receiving ----------
+let recvMeta = null;
+let recvChunks = [];
+let recvBytes = 0;
+
+function handleMessageFromDC(ev){
+  if(typeof ev.data === 'string'){
+    try{
+      const obj = JSON.parse(ev.data);
+      if(obj.type === 'meta'){
+        recvMeta = obj; recvChunks = []; recvBytes = 0;
+        el('recvMeta').innerHTML = `<div>文件: <b>${obj.name}</b> 原始大小: ${obj.origSize} bytes 加密大小: ${obj.encSize} bytes</div><div class='hint'>请输入密码以解密后下载（按下“尝试解密并下载”）</div>`;
+        el('progress').style.display='block'; el('progress').value=0; log('收到 meta，等待数据...');
+      }else if(obj.type === 'end'){
+        log('收到 end 标记，准备合并与解密');
+        el('progress').value = 100;
+      }
+    }catch(e){ console.warn('非 JSON 消息',e) }
+  } else if(ev.data instanceof ArrayBuffer){
+    // binary chunk
+    recvChunks.push(new Uint8Array(ev.data)); recvBytes += ev.data.byteLength;
+    if(recvMeta){
+      const pct = Math.floor((recvBytes / recvMeta.encSize)*100);
+      el('progress').value = pct; log('接收中：'+pct+'%');
+    } else {
+      log('收到二进制数据，但未收到 meta');
+    }
+  }
+}
+
+el('tryDecrypt').addEventListener('click', async ()=>{
+  if(!recvMeta) return alert('没有待解密的数据');
+  const password = el('recvPassword').value; if(!password) return alert('请输入密码');
+  try{
+    const salt = base64ToBuf(recvMeta.salt);
+    const iv = base64ToBuf(recvMeta.iv);
+    const key = await deriveKeyFromPassword(password, salt);
+    // merge chunks
+    const total = recvChunks.reduce((s,c)=>s+c.byteLength,0);
+    const merged = new Uint8Array(total);
+    let off=0; for(const c of recvChunks){ merged.set(c,off); off+=c.byteLength }
+    // decrypt
+    const dec = await crypto.subtle.decrypt({name:'AES-GCM',iv:iv}, key, merged.buffer);
+    // create blob & download
+    const blob = new Blob([dec]);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = recvMeta.name; document.body.appendChild(a); a.click(); a.remove();
+    log('解密并下载成功。');
+  }catch(e){ console.error(e); alert('解密失败（密码错误或数据损坏）'); }
+});
+
+el('clearReceived').addEventListener('click', ()=>{ recvMeta=null; recvChunks=[]; recvBytes=0; el('recvMeta').innerHTML=''; el('progress').style.display='none'; el('progress').value=0; log('已清空接收数据'); });
+
+// helper base64 decode for ArrayBuffer
+function atobToArrayBuffer(b64){ const bin = atob(b64); const len = bin.length; const arr = new Uint8Array(len); for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i); return arr.buffer; }
+
+</script></body>
+  </html>

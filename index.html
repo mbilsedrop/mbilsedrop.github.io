@@ -34,6 +34,9 @@
     <p class="lead">在两台设备上打开此页面，一台设备点Host，一台点join，把host端的密钥输到join端的输入框，在生成join(点击Set remote) ，把join端的密钥输到host端的输入框，host端点连接(Set remote)看到状态：datachannel open则成功。</p><div class="cols">
   <div>
     <h3>(1) 建立连接（手动交换 Offer/Answer）</h3>
+   
+    <br />
+    <h3>1. 连接设备</h3>
     <label>本地操作：</label>
     <div class="row">
       <button id="createOffer">Create Offer（发送端/Host）</button>
@@ -55,6 +58,9 @@
 
   <div>
     <h3>(2) 文件与密码</h3>
+
+    <br />
+    <h3>2. 发送文件</h3>
     <label>选择文件（发送端）</label>
     <input id="fileInput" type="file">
     <label>设置传输密码（发送端用于加密）</label>
@@ -198,7 +204,7 @@ let sending = false;
 let abortController = {abort:false};
 
 el('sendFile').addEventListener('click', async ()=>{
-  if(!dc || dc.readyState !== 'open') return alert('DataChannel 未打开，先建立连接');
+  if(!dc || dc.readyState !== 'open') return alert('DataChannel 未打开，请先建立连接');
   const f = el('fileInput').files[0]; if(!f) return alert('请选择文件');
   const password = el('sendPassword').value; if(!password) return alert('请设置密码');
 
@@ -257,7 +263,7 @@ function handleMessageFromDC(ev){
         el('recvMeta').innerHTML = `<div>文件: <b>${obj.name}</b> 原始大小: ${obj.origSize} bytes 加密大小: ${obj.encSize} bytes</div><div class='hint'>请输入密码以解密后下载（按下“尝试解密并下载”）</div>`;
         el('progress').style.display='block'; el('progress').value=0; log('收到 meta，等待数据...');
       }else if(obj.type === 'end'){
-        log('收到 end 标记，准备合并与解密');
+        log('已收到 end 标记，准备合并与解密');
         el('progress').value = 100;
       }
     }catch(e){ console.warn('非 JSON 消息',e) }
@@ -291,7 +297,7 @@ el('tryDecrypt').addEventListener('click', async ()=>{
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = recvMeta.name; document.body.appendChild(a); a.click(); a.remove();
     log('解密并下载成功。');
-  }catch(e){ console.error(e); alert('解密失败（密码错误或数据损坏）'); }
+  }catch(e){ console.error(e); alert('E:解密失败（密码错误或数据损坏）'); }
 });
 
 el('clearReceived').addEventListener('click', ()=>{ recvMeta=null; recvChunks=[]; recvBytes=0; el('recvMeta').innerHTML=''; el('progress').style.display='none'; el('progress').value=0; log('已清空接收数据'); });

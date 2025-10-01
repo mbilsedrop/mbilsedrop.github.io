@@ -1,2 +1,2 @@
 # DotDrop
-The website
+一个互传工具，让你在异地轻松互传1GB以上的文件！
